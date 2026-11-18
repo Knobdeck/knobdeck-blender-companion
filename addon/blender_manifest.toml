@@ -1,0 +1,23 @@
+schema_version = "1.0.0"
+
+# Ids and the plugin's action ids are a contract: never rename.
+id = "knobdeck"
+version = "1.0.0"
+name = "KnobDeck"
+tagline = "Control Blender from KnobDeck dials and keys"
+maintainer = "KnobDeck <support@harshalkudale.com>"
+type = "add-on"
+website = "https://github.com/Knobdeck/knobdeck-blender-companion"
+tags = ["Animation", "User Interface", "System"]
+
+blender_version_min = "4.2.0"
+
+license = ["SPDX:MIT"]
+copyright = ["2026 The KnobDeck authors"]
+
+[permissions]
+network = "Connect to the KnobDeck app on this computer (127.0.0.1) only"
+files = "Read the connection file KnobDeck writes in its settings folder"
+
+[build]
+paths_exclude_pattern = ["__pycache__/", "/.git/", "*.zip"]

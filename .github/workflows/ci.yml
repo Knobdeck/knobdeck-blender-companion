@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      plugins_ref:
+        description: knobdeck-plugins branch or tag to test against
+        default: master
+  workflow_call:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11" # Blender 4.2's Python
+      - run: pip install ruff==0.17.5
+      - run: ruff check .
+      - run: ruff format --check .
+      - name: Hub link tests (no Blender)
+        run: python -m unittest discover -s tests -p "test_*.py" -v
+
+  blender:
+    name: Blender ${{ matrix.blender }}
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        # The oldest Blender the manifest allows (blender_version_min) and the newest release.
+        blender: ["4.2.23", "5.3.0"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The KnobDeck `blender` plugin, built from source, so the end-to-end test drives the real thing.
+      - uses: actions/checkout@v4
+        with:
+          repository: Knobdeck/knobdeck-plugins
+          ref: ${{ inputs.plugins_ref || 'master' }}
+          path: knobdeck-plugins
+      - name: Libraries headless Blender loads
+        run: sudo apt-get update -q && sudo apt-get install -yq libxi6 libxxf86vm1 libxfixes3 libxrender1 libxkbcommon0 libsm6 libgl1 libegl1
+      - name: Cache Blender
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ~/blender
+          key: blender-${{ matrix.blender }}-linux-x64
+      - name: Download Blender
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          V: ${{ matrix.blender }}
+        run: |
+          series="${V%.*}"
+          mkdir -p ~/blender
+          curl -fsSL "https://download.blender.org/release/Blender$series/blender-$V-linux-x64.tar.xz" | tar -xJ -C ~/blender --strip-components=1
+      - run: echo "$HOME/blender" >> "$GITHUB_PATH"
+      - run: blender --version
+      - name: Validate and build the extension
+        run: |
+          blender --command extension validate addon
+          mkdir -p dist
+          blender --command extension build --source-dir addon --output-dir dist
+      - name: Smoke test in headless Blender
+        run: |
+          export BLENDER_USER_RESOURCES="$RUNNER_TEMP/blender-user"
+          blender --background --factory-startup --python-exit-code 1 --python tests/blender_smoke.py -- dist/knobdeck-*.zip
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: knobdeck-plugins
+      - name: Build the KnobDeck blender plugin
+        working-directory: knobdeck-plugins
+        run: cargo build --release -p blender
+      - name: End to end with the plugin
+        run: python3 tests/e2e_plugin.py knobdeck-plugins/target/release/blender blender dist/knobdeck-*.zip
+      - uses: actions/upload-artifact@v4
+        # One package: built by the oldest supported Blender.
+        if: matrix.blender == '4.2.23'
+        with:
+          name: knobdeck-blender-companion
+          path: dist/knobdeck-*.zip

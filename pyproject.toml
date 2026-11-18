@@ -1,0 +1,9 @@
+# Lint settings only (`ruff check`, `ruff format --check`); the add-on is built by Blender:
+# blender --command extension build --source-dir addon --output-dir dist
+[tool.ruff]
+line-length = 140
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "I"]
+ignore = ["E741", "E731", "E501"]  # long lines: the formatter wraps what it can

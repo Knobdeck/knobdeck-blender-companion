@@ -1,0 +1,118 @@
+# Actions → Release → Run workflow (on master) releases the version in addon/blender_manifest.toml:
+# it runs CI, creates the tag v<version> and a GitHub release with the extension zip, then uploads
+# it to extensions.blender.org as a new version of the `knobdeck` extension.
+#
+# The upload is skipped (with a warning) until the BLENDER_EXTENSIONS_TOKEN secret is set in the
+# `release` environment; see CONTRIBUTING.md. Re-running for a version that already has a
+# release skips the release and only retries the upload.
+name: Release
+
+on:
+  workflow_dispatch:
+
+concurrency: release
+
+jobs:
+  ci:
+    if: github.ref == 'refs/heads/master'
+    uses: ./.github/workflows/ci.yml
+
+  release:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write # tag and GitHub release
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: echo "version=$(python3 -c 'import tomllib; print(tomllib.load(open("addon/blender_manifest.toml", "rb"))["version"])')" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: knobdeck-blender-companion
+          path: dist
+      - name: Tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            released=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)
+            if [ "$released" != "$GITHUB_SHA" ]; then
+              echo "::warning::$tag was released from ${released:0:7}, not this commit. Nothing new ships unless you bump the version in addon/blender_manifest.toml; retrying the upload for $tag only."
+            else
+              echo "::notice::$tag is already released; retrying the upload only"
+            fi
+            exit 0
+          fi
+          awk '/^## /{n++} n==1' CHANGELOG.md | tail -n +2 > notes.md
+          gh release create "$tag" "dist/knobdeck-$VERSION.zip" --target "$GITHUB_SHA" \
+            --title "KnobDeck add-on for Blender $VERSION" --notes-file notes.md
+
+  extensions:
+    # extensions.blender.org: POST /api/v1/extensions/<id>/versions/upload/ with a personal token
+    # (developer.blender.org/docs/features/extensions/ci_cd/). The first version is submitted by
+    # hand on the website; this uploads every later one.
+    needs: release
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: knobdeck-blender-companion
+          path: dist
+      - name: Upload to extensions.blender.org
+        env:
+          TOKEN: ${{ secrets.BLENDER_EXTENSIONS_TOKEN }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::warning::BLENDER_EXTENSIONS_TOKEN is not set in the release environment; skipped the extensions.blender.org upload."
+            exit 0
+          fi
+          awk '/^## /{n++} n==1' CHANGELOG.md | tail -n +2 > notes.md
+          code=$(curl -sS -o response.json -w '%{http_code}' -X POST \
+            "https://extensions.blender.org/api/v1/extensions/knobdeck/versions/upload/" \
+            -H "Authorization: bearer $TOKEN" \
+            -F "version_file=@dist/knobdeck-$VERSION.zip" \
+            -F "release_notes=<notes.md")
+          cat response.json; echo
+          if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+            echo "::notice::Uploaded $VERSION; it appears once the version is approved (if review applies)."
+          elif grep -qiE 'already (exists|uploaded)|version.*exists' response.json; then
+            echo "::notice::extensions.blender.org already has $VERSION"
+          else
+            echo "::error::extensions.blender.org answered HTTP $code"
+            exit 1
+          fi
+
+  catalog:
+    # Tells the knobdeck-registry catalog to rebuild. Skipped until the catalog GitHub App is set up
+    # (CATALOG_APP_ID variable, CATALOG_APP_PRIVATE_KEY secret). Runs even when the upload failed,
+    # because the GitHub release already exists.
+    needs: [release, extensions]
+    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Catalog app token
+        id: app
+        if: vars.CATALOG_APP_ID != ''
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.CATALOG_APP_ID }}
+          private-key: ${{ secrets.CATALOG_APP_PRIVATE_KEY }}
+          owner: Knobdeck
+          repositories: knobdeck-registry
+      - name: Tell the catalog
+        if: steps.app.outputs.token != ''
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          VERSION: ${{ needs.release.outputs.version }}
+        run: |
+          jq -n --arg repo "$GITHUB_REPOSITORY" --arg id "blender" --arg version "$VERSION" \
+            '{event_type: "companion-released", client_payload: {repo: $repo, id: $id, version: $version}}' |
+            gh api repos/Knobdeck/knobdeck-registry/dispatches --input -
