@@ -55,8 +55,9 @@ the smoke test and the end-to-end test with the `blender` plugin built from knob
 
 ## Releasing
 
-1. Bump `version` in `addon/blender_manifest.toml` and add a `CHANGELOG.md` entry. Merge to `master`.
-2. **Actions → Release → Run workflow** on `master`.
+1. Bump `version` in `addon/blender_manifest.toml` and add a `CHANGELOG.md` entry. Merge to `master`; that
+   starts the Release workflow, which ships the new version. A push that doesn't bump the version
+   only runs CI. To retry the stores for a released version, use **Actions → Release → Run workflow** on `master`.
 
 `.github/workflows/release.yml` runs CI, creates the tag `v<version>` and a GitHub release with
 `knobdeck-<version>.zip`, then uploads it to
