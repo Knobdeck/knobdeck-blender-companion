@@ -1,13 +1,16 @@
-# Actions → Release → Run workflow (on master) releases the version in addon/blender_manifest.toml:
-# it runs CI, creates the tag v<version> and a GitHub release with the extension zip, then uploads
-# it to extensions.blender.org as a new version of the `knobdeck` extension.
+# Every push to master runs this. When the version in addon/blender_manifest.toml has no release
+# yet, it runs CI, creates the tag v<version> and a GitHub release with the extension zip, then
+# uploads it to extensions.blender.org as a new version of the `knobdeck` extension. A push that
+# doesn't bump the version only runs CI.
 #
 # The upload is skipped (with a warning) until the BLENDER_EXTENSIONS_TOKEN secret is set in the
-# `release` environment; see CONTRIBUTING.md. Re-running for a version that already has a
-# release skips the release and only retries the upload.
+# `release` environment; see CONTRIBUTING.md. Actions → Release → Run workflow on master for a
+# version that already has a release skips the release and only retries the upload.
 name: Release
 
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
 
 concurrency: release
@@ -25,6 +28,7 @@ jobs:
       contents: write # tag and GitHub release
     outputs:
       version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.tag.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
       - id: version
@@ -34,12 +38,18 @@ jobs:
           name: knobdeck-blender-companion
           path: dist
       - name: Tag and GitHub release
+        id: tag
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           tag="v$VERSION"
           if gh release view "$tag" >/dev/null 2>&1; then
+            if [ "$GITHUB_EVENT_NAME" = push ]; then
+              echo "::notice::$tag is already released; bump the version in addon/blender_manifest.toml to ship this push"
+              exit 0
+            fi
+            echo "publish=true" >> "$GITHUB_OUTPUT"
             released=$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)
             if [ "$released" != "$GITHUB_SHA" ]; then
               echo "::warning::$tag was released from ${released:0:7}, not this commit. Nothing new ships unless you bump the version in addon/blender_manifest.toml; retrying the upload for $tag only."
@@ -51,12 +61,14 @@ jobs:
           awk '/^## /{n++} n==1' CHANGELOG.md | tail -n +2 > notes.md
           gh release create "$tag" "dist/knobdeck-$VERSION.zip" --target "$GITHUB_SHA" \
             --title "KnobDeck add-on for Blender $VERSION" --notes-file notes.md
+          echo "publish=true" >> "$GITHUB_OUTPUT"
 
   extensions:
     # extensions.blender.org: POST /api/v1/extensions/<id>/versions/upload/ with a personal token
     # (developer.blender.org/docs/features/extensions/ci_cd/). The first version is submitted by
     # hand on the website; this uploads every later one.
     needs: release
+    if: needs.release.outputs.publish == 'true'
     runs-on: ubuntu-latest
     environment: release
     steps:
@@ -95,7 +107,7 @@ jobs:
     # (CATALOG_APP_ID variable, CATALOG_APP_PRIVATE_KEY secret). Runs even when the upload failed,
     # because the GitHub release already exists.
     needs: [release, extensions]
-    if: ${{ !cancelled() && needs.release.result == 'success' }}
+    if: ${{ !cancelled() && needs.release.result == 'success' && needs.release.outputs.publish == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Catalog app token
